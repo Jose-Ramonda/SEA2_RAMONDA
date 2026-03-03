@@ -31,8 +31,8 @@
 
 
 void uart_init(void);
-void uart_rx_task(void *arg);
-void uart_rx_task2(void *pvParameters);
-void uart_tx_task(void *arg);
+void uart_rx_task_poll(void *arg);
+void uart_rx_task(void *pvParameters);
+
 void app_uart_send(uint8_t *trama, int len);
 StreamBufferHandle_t uart_get_rx_streambuffer(void);  // Acceso público al contenido del buffer

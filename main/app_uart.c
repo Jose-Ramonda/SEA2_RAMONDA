@@ -53,7 +53,7 @@ void uart_init(void){       //Tarea, que se autodestruye mejor que función, la 
     ESP_LOGI("UART", "UART inicializado correctamente");
 }
 
-void uart_rx_task(void *arg)
+void uart_rx_task_poll(void *arg)
 {
     // Usar static saca el buffer del stack de la tarea y lo lleva a la memoria global
     static uint8_t temp_rx_buf[UART_RX_STREAMBUFFER_SIZE];    //Buffer temporal donde se lee el buffer de rx
@@ -81,7 +81,7 @@ StreamBufferHandle_t uart_get_rx_streambuffer(void){
 
 
 
-void uart_rx_task2(void *pvParameters) {
+void uart_rx_task(void *pvParameters) {
     uart_event_t event;
     static uint8_t temp_rx_buf[UART_RX_STREAMBUFFER_SIZE];    //Buffer temporal donde se lee el buffer de rx
     ESP_LOGI("UART","TAREA DE RX");     
@@ -118,7 +118,7 @@ void uart_rx_task2(void *pvParameters) {
                     break;
 
                 case UART_BREAK:
-                    ESP_LOGI("UART", "Detección de línea en BREAK");
+                    //ESP_LOGI("UART", "Detección de línea en BREAK");
                     break;
 
                 default:
@@ -134,9 +134,10 @@ void uart_rx_task2(void *pvParameters) {
 void app_uart_send(uint8_t *trama, int len){
     uart_write_bytes(UART_PORT, (const char*)trama, (size_t) len);
 
-    for(int i = 0; i< len; i++){
+    /*for(int i = 0; i< len; i++){    //Solo para debug
         ESP_LOGI("COPOSER", "  0x%02X ", trama[i]);
     }
+        */
     // Bloqueante: asegura que el Dispatcher no siga hasta que el cable esté libre
-    uart_wait_tx_done(UART_PORT, pdMS_TO_TICKS(100));   //Peligroso, ver tiempos de polling y analizar alternativas
+    uart_wait_tx_done(UART_PORT, pdMS_TO_TICKS(PROTOCOL_POLLING_TIME/2));   //Tiene que esperar la mitad del tiempo de polling como maximo
 }

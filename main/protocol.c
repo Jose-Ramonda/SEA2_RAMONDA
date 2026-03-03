@@ -3,28 +3,25 @@
 *   tramas recibidas por RS485, su verificación y el formateo para el envío
 *
 *   Autor: José Ramonda
-*   Actualizado 21/1/2026
+*   Actualizado 28/2/2026
 */
 
 
 #include <stdio.h>
 #include <string.h>
 
-/* 1. FreeRTOS - EL ORDEN AQUÍ ES VITAL */
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
 #include "freertos/stream_buffer.h"
 #include "freertos/message_buffer.h"
-#include "freertos/event_groups.h"
+#include "freertos/semphr.h"
 
 
-/* 2. Cabeceras del Sistema / SDK */
 #include "esp_log.h"
-#include "esp_rom_crc.h"    //muy puta de usar
 #include "esp_crc.h"
-#include "driver/uart.h"
-#include "driver/gpio.h"
+//#include "driver/uart.h"
+//#include "driver/gpio.h"
 
 /* 3. Tus cabeceras locales */
 #include "config.h"
@@ -34,33 +31,86 @@
 static uint8_t id_nodo;
 static uint8_t id_master;
 
+
+static int n_st_cmd;
+static int n_ctrl_cmd;
 static QueueHandle_t tx_queue; // Solo visible en este archivo
+static MessageBufferHandle_t *cmd_buff = NULL;  //Puntero a arreglo de msjbuffers
+static SemaphoreHandle_t *cmd_smph = NULL;
 
-static MessageBufferHandle_t cmd_buff[PROTOCOL_MAX_COMANDS];
 
-void protocol_init(int cmds, uint8_t masterid, uint8_t nodoid){
-    id_nodo = nodoid;
-    //id_master = masterid;
-    id_master = nodoid;
+static TaskHandle_t parser_handler;
+static TaskHandle_t dispatcher_handler;
 
-    if(cmds > PROTOCOL_MAX_COMANDS) cmds = PROTOCOL_MAX_COMANDS;
-    for(int i=0;i < cmds ;i++){
+void parser_task(void *pvParameters);   //Evitar error de implicit declaration
+void dispatcher_task(void *pvParameters);
+
+
+void protocol_init(protocol_params_t *params){
+    id_nodo = params->nodoid;
+    id_master = params->masterid;
+
+
+    //Valido que los control commands esten en el rango 0-99 y los stream commands en 100-255
+    if(params->ctrl_cmds > 99){
+        params->ctrl_cmds = 99;
+        ESP_LOGE("PROTOCOL","CANTIDAD DE COMANDOS DE CONTROL EXCEDIDA- SE AJUSTAN A 99");
+    }
+    if(params->st_cmds > 155){
+        params->st_cmds = 155;
+        ESP_LOGE("PROTOCOL","CANTIDAD DE COMANDOS DE TRANSMICION EXCEDIDA- SE AJUSTAN A 155");
+    }
+    n_ctrl_cmd = params->ctrl_cmds;
+    n_st_cmd = params->st_cmds;
+
+    //Reservo memmoria para los buffers, no creo un arreglo porque no me deja crear un arreglo static en funcion
+    cmd_buff = (MessageBufferHandle_t *) malloc(params->st_cmds * sizeof(MessageBufferHandle_t)); 
+
+    for(int i=0;i < params->st_cmds ;i++){
         cmd_buff[i]= xMessageBufferCreate((size_t)PROTOCOL_MAX_PAYLOAD_SIZE);
         if (cmd_buff[i] == NULL) {
             ESP_LOGE("PROTOCOL", "Error creando buffer %d", i);
         }
-    }
+    }     
 
-       tx_queue = xQueueCreate((UBaseType_t)cmds, (UBaseType_t)sizeof(q_msj_t));    //conservador
+    //Hago lo propio para las notificaciones de lso de control
+    cmd_smph = (SemaphoreHandle_t *)malloc(params->ctrl_cmds* sizeof(SemaphoreHandle_t));
+    for(int j=0;j < params->ctrl_cmds ;j++){
+        cmd_smph[j]= xSemaphoreCreateBinary();
+        if (cmd_smph[j] == NULL) {
+            ESP_LOGE("PROTOCOL", "Error creando semaforo %d", j);
+        }
+    }   
+
+    //Y finalmente creo la cola de salida
+    tx_queue = xQueueCreate((UBaseType_t) (params->ctrl_cmds+params->st_cmds), (UBaseType_t)sizeof(q_msj_t));  
+
+
+
+    //Se crean las tareas
+    xTaskCreate(parser_task,"PARSER_TASK",params->parser_stack,params->buffer_getter,params->parser_priority,&parser_handler);
+    xTaskCreate(dispatcher_task,"DISPATCHER_TASK",params->dispatcher_stack,params->sender,params->dispatcher_priority,&dispatcher_handler);
 }
 
 MessageBufferHandle_t cmd_buff_getter(int id){
-    if (id < 0 || id >= PROTOCOL_MAX_COMANDS) return NULL;
-    return cmd_buff[id];
+    if (id < 100 || id >= 100+n_st_cmd || cmd_buff == NULL) return NULL;
+    return cmd_buff[id-100];
+}
+
+
+SemaphoreHandle_t protocol_get_ctrl_sem(int cmd) {
+    if (cmd < n_ctrl_cmd && cmd_smph != NULL) {
+        return cmd_smph[cmd];
+    }
+    return NULL;
 }
 
 void parser_task(void *pvParameters) { // Recibe los datos entrantes, clasifica y valida
-    StreamBufferHandle_t rx_stream = uart_get_rx_streambuffer();    //Despeus desacoplar
+    // Casteamos el puntero genérico al tipo de función definida
+    parser_interface_func getter = (parser_interface_func) pvParameters;
+
+    // La ejecutamos para obtener el StreamBuffer
+    StreamBufferHandle_t rx_stream = getter();    
 
     if (rx_stream == NULL) {    //Verifica la existencia del buffer
         ESP_LOGE("PROTOCOL", "El buffer no existe, abortando");
@@ -69,7 +119,7 @@ void parser_task(void *pvParameters) { // Recibe los datos entrantes, clasifica 
 
     uint8_t byte_in;
     uint8_t buff[PROTOCOL_MAX_PAYLOAD_SIZE + PROTOCOL_HEADER_SIZE];   //Aquí se guardan los datos recibidos ¿usar variables y malloc?
-    uint8_t CRC[2];
+
     
     uint8_t cmd = -1;   //valor de error para evitar un falso comando
     uint8_t len =0; //En teoria el valor no afecta cambia pero el compilador exije inicializar
@@ -125,13 +175,13 @@ void parser_task(void *pvParameters) { // Recibe los datos entrantes, clasifica 
             break;
         
         case ST_VAL_CRC:
-            if(xStreamBufferReceive(rx_stream, CRC, 2, pdMS_TO_TICKS(PROTOCOL_WAIT * 2)) == 2){
+            if(xStreamBufferReceive(rx_stream, &crc_recibido, 2, pdMS_TO_TICKS(PROTOCOL_WAIT * 2)) == 2){
                     crc_calc = esp_crc16_le(PROTOCOL_CRC_SEED, buff, len + PROTOCOL_HEADER_SIZE);
-                    crc_recibido = (CRC[1] << 8) | CRC[0];
+                    
                     if (crc_calc == crc_recibido){
                         estado = ST_PARS;
                     } else {
-                        ESP_LOGE("PARSER","CRC INVALIDO");
+                        ESP_LOGI("PARSER","CRC INVALIDO");
                         estado = ST_REP;
                     }
                 } else{
@@ -144,11 +194,19 @@ void parser_task(void *pvParameters) { // Recibe los datos entrantes, clasifica 
             ESP_LOGI("PARSER","MENSAJE EXITOSO, Comando %d Msj len %d", cmd, len);
             printf("%.*s\n", len, &buff[PROTOCOL_HEADER_SIZE]);
             //Aca debo mandar el ACK, no en las tareas
-            xMessageBufferSend(cmd_buff[cmd],&buff[PROTOCOL_HEADER_SIZE],len,pdMS_TO_TICKS(PROTOCOL_WAIT * len));
+            if(cmd >= 100 && cmd-100 < n_st_cmd && cmd_buff != NULL){
+                xMessageBufferSend(cmd_buff[cmd-100],&buff[PROTOCOL_HEADER_SIZE],len,pdMS_TO_TICKS(PROTOCOL_WAIT * len));
+            }
+            if(cmd<100 && cmd < n_ctrl_cmd && cmd_smph != NULL){
+                xSemaphoreGive(cmd_smph[cmd]);
+            }
+
+            xTaskNotify(dispatcher_handler, PROTOCOL_RECIVED_GOOD, eSetValueWithOverwrite); //informo evento exitoso
             estado = ST_WAIT;
             break;
         case ST_REP:
-             //Acá mando la solcitud de repe cuadno haga el composer, el NACK
+             xTaskNotify(dispatcher_handler, PROTOCOL_RECIVED_BAD, eSetValueWithOverwrite);
+             estado = ST_WAIT;
             break;
             
         default:
@@ -160,7 +218,7 @@ void parser_task(void *pvParameters) { // Recibe los datos entrantes, clasifica 
 
 void composer(uint8_t cmd, uint8_t len, uint8_t *payload, SemaphoreHandle_t binsen){
     /*Toma semaforo de puntero a payload y encola los datos*/
-    ESP_LOGI("COMPOSER","ARRNACA COMPSER");
+    //ESP_LOGI("COMPOSER","ARRNACA COMPSER");
     q_msj_t mensaje;
     uint16_t crc;  //mas adelante cambiar todo al crc de 16 bits, mas facil en general aunque menos legible
     
@@ -182,8 +240,8 @@ void composer(uint8_t cmd, uint8_t len, uint8_t *payload, SemaphoreHandle_t bins
         crc = esp_crc16_le(crc, payload, len);
     }
     
-    mensaje.msj.CRC[0] = (uint8_t)(crc >> 8);
-    mensaje.msj.CRC[1] = (uint8_t)(crc& 0xFF);
+    mensaje.msj.CRC = crc;//[0] = (uint8_t)(crc >> 8);
+    //mensaje.msj.CRC[1] = (uint8_t)(crc& 0xFF);
 
     //Justo antes de ma ndar tomo el semáforo, así aseguro que si el dispatcher es de mas prioridad y se activa apenas mando ya este tomado
 
@@ -201,29 +259,65 @@ void dispatcher_task(void *pvParameters) {
     /*Toma datos encolados y los madna cuando recibe la notificacion de polling, tambien gestiona el envio de ack
     implementació pendiente*/
 
+    dispatcher_interface_func enviar = (dispatcher_interface_func) pvParameters;
+
     q_msj_t mensaje;
     uint8_t buff[1+PROTOCOL_HEADER_SIZE+PROTOCOL_MAX_PAYLOAD_SIZE+sizeof(uint16_t)];
     int real_len;
 
     buff[0] = PROTOCOL_START_BYTE;
+    uint32_t valor;
 
+    uint16_t CRC;
     while(1){
-        if(xQueueReceive(tx_queue, &mensaje, portMAX_DELAY)){
-            buff[1] = mensaje.msj.id;
-            buff[2] = mensaje.msj.cmd;
-            buff[3] = mensaje.msj.len;
-            memcpy(&buff[1 + PROTOCOL_HEADER_SIZE], mensaje.msj.payload, mensaje.msj.len);
-            memcpy(&buff[1 + PROTOCOL_HEADER_SIZE +  mensaje.msj.len], mensaje.msj.CRC, sizeof(uint16_t));
+        
+        if (xTaskNotifyWait(0, 0xFFFFFFFF, &valor, portMAX_DELAY) == pdPASS){
 
-            real_len = 1 + PROTOCOL_HEADER_SIZE + mensaje.msj.len +sizeof(uint16_t);
+            switch (valor)
+            {
+            case PROTOCOL_RECIVED_GOOD:
+                if(xQueueReceive(tx_queue, &mensaje, 0)){   //si tengo datos tatata
+                    buff[1] = mensaje.msj.id;
+                    buff[2] = mensaje.msj.cmd;
+                    buff[3] = mensaje.msj.len;
+                    memcpy(&buff[1 + PROTOCOL_HEADER_SIZE], mensaje.msj.payload, mensaje.msj.len);
+                    memcpy(&buff[1 + PROTOCOL_HEADER_SIZE +  mensaje.msj.len], &mensaje.msj.CRC, sizeof(uint16_t));
 
-            app_uart_send(buff, real_len);  //Esto despues desacoplar pro ahora solo probando funcionalidad de mensajes
+                    real_len = 1 + PROTOCOL_HEADER_SIZE + mensaje.msj.len +sizeof(uint16_t);
 
-            if( mensaje.semaforo != NULL){
-                xSemaphoreGive(mensaje.semaforo);
+                    enviar(buff, real_len);  //Esto despues desacoplar pro ahora solo probando funcionalidad de mensajes
+
+                    if( mensaje.semaforo != NULL){
+                        xSemaphoreGive(mensaje.semaforo);
+                    }
+                } else {
+                    buff[1] = id_nodo;
+                    buff[2] = PROTOCOL_ACK_CMD;
+                    buff[3] = 0;
+                    CRC = esp_crc16_le(PROTOCOL_CRC_SEED, &buff[1],PROTOCOL_HEADER_SIZE);
+                    memcpy(&buff[1 + PROTOCOL_HEADER_SIZE], &CRC, sizeof(uint16_t));
+                    real_len = 1+PROTOCOL_HEADER_SIZE+sizeof(uint16_t);
+                    enviar(buff, real_len);  //MAndo un  simple ack
+                }
+                break;
+            case PROTOCOL_RECIVED_BAD:
+                buff[1] = id_nodo;
+                buff[2] = PROTOCOL_NACK_CMD;
+                buff[3] = 0;
+                CRC = esp_crc16_le(PROTOCOL_CRC_SEED, &buff[1],PROTOCOL_HEADER_SIZE);
+                memcpy(&buff[1 + PROTOCOL_HEADER_SIZE], &CRC, sizeof(uint16_t));
+                real_len = 1+PROTOCOL_HEADER_SIZE+sizeof(uint16_t);
+                enviar(buff, real_len);  //MAndo un  simple ack
+                break;
+
+            default:
+                ESP_LOGE("PROTOCOL","Notificacion desconocida");
+                break;
             }
 
+
         }
+        
     }
 
 }

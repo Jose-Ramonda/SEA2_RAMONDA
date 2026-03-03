@@ -9,31 +9,35 @@
 #include "config.h"
 #include "app_uart.h"
 #include "protocol.h"
+#include "SEAII.h"
 
-#include "esp_rom_crc.h"    //muy puta de usar
-#include "esp_crc.h"
 
 void app_main(void){   
     
-    int a= 3;
-    uint8_t b = MASTER_ID;
-    uint8_t c = NODO_ID_DEFAULT;    //No me deja llamar con macros la porquería esta
+    protocol_params_t parametros;
+    parametros.ctrl_cmds =10;
+    parametros.st_cmds =10;
+    parametros.masterid= MASTER_ID;
+    parametros.nodoid = NODO_ID_DEFAULT;
+
+    parametros.dispatcher_priority = 8;
+    parametros.buffer_getter = uart_get_rx_streambuffer;
+    parametros.dispatcher_stack =4096;
+
+    parametros.sender = app_uart_send;
+    parametros.parser_priority = 7;
+    parametros.parser_stack = 4096;
     
     uart_init();
-    protocol_init(a,b,c);
-    xTaskCreate(uart_rx_task2,"RX_TASK",4096,NULL,4,NULL);
+    xTaskCreate(uart_rx_task,"RX_TASK",4096,NULL,10,NULL);
+    protocol_init(&parametros);
 
-    //xTaskCreate(reciver_task,"ECHO_TASK",4096,NULL,1,NULL);    
-    xTaskCreate(parser_task,"PARSER_TASK",4096,NULL,1,NULL);
-
-    xTaskCreate(dispatcher_task,"DISPATCHER",4096,NULL,2,NULL);
+    xTaskCreate(CMD2_LED_task,"LED_TASK",4096,NULL,4,NULL);
+    xTaskCreate(CMD3_SLOW_task,"SLOW_TASK",4096,NULL,2,NULL);
+    xTaskCreate(CMD100_INVERTER_task,"INVERTER_TASK",4096,NULL,2,NULL);
 
     printf("Arrancamos:\n\r");
-    uint8_t datos[] = "HOLA"; 
-
-    // Llamamos al composer
-    // cmd = 2 (por ejemplo), len = 4, payload = datos, semáforo = NULL (no hace falta para un string estático)
-    composer(2, 4, datos, NULL);
+    
 
 
 }
