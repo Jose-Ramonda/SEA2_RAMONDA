@@ -23,7 +23,7 @@
 //#include "driver/uart.h"
 //#include "driver/gpio.h"
 
-/* 3. Tus cabeceras locales */
+//Cabeceras locales 
 #include "config.h"
 #include "app_uart.h"
 #include "protocol.h"
@@ -34,7 +34,7 @@ static uint8_t id_master;
 
 static int n_st_cmd;
 static int n_ctrl_cmd;
-static QueueHandle_t tx_queue; // Solo visible en este archivo
+static QueueHandle_t tx_queue = NULL; // Solo visible en este archivo
 static MessageBufferHandle_t *cmd_buff = NULL;  //Puntero a arreglo de msjbuffers
 static SemaphoreHandle_t *cmd_smph = NULL;
 
@@ -68,23 +68,20 @@ void protocol_init(protocol_params_t *params){
 
     for(int i=0;i < params->st_cmds ;i++){
         cmd_buff[i]= xMessageBufferCreate((size_t)PROTOCOL_MAX_PAYLOAD_SIZE);
-        if (cmd_buff[i] == NULL) {
-            ESP_LOGE("PROTOCOL", "Error creando buffer %d", i);
-        }
+        assert(cmd_buff[i] != NULL);    //Si no hay memoria el proegrama falla
     }     
 
     //Hago lo propio para las notificaciones de lso de control
     cmd_smph = (SemaphoreHandle_t *)malloc(params->ctrl_cmds* sizeof(SemaphoreHandle_t));
     for(int j=0;j < params->ctrl_cmds ;j++){
         cmd_smph[j]= xSemaphoreCreateBinary();
-        if (cmd_smph[j] == NULL) {
-            ESP_LOGE("PROTOCOL", "Error creando semaforo %d", j);
-        }
+        assert(cmd_smph[j] != NULL);
+
     }   
 
     //Y finalmente creo la cola de salida
     tx_queue = xQueueCreate((UBaseType_t) (params->ctrl_cmds+params->st_cmds), (UBaseType_t)sizeof(q_msj_t));  
-
+    assert(tx_queue != NULL);
 
 
     //Se crean las tareas
@@ -112,10 +109,8 @@ void parser_task(void *pvParameters) { // Recibe los datos entrantes, clasifica 
     // La ejecutamos para obtener el StreamBuffer
     StreamBufferHandle_t rx_stream = getter();    
 
-    if (rx_stream == NULL) {    //Verifica la existencia del buffer
-        ESP_LOGE("PROTOCOL", "El buffer no existe, abortando");
-        vTaskDelete(NULL);
-    }
+    assert( rx_stream != NULL);     //Verifica la existencia del buffer
+    
 
     uint8_t byte_in;
     uint8_t buff[PROTOCOL_MAX_PAYLOAD_SIZE + PROTOCOL_HEADER_SIZE];   //Aquí se guardan los datos recibidos ¿usar variables y malloc?
@@ -154,6 +149,10 @@ void parser_task(void *pvParameters) { // Recibe los datos entrantes, clasifica 
             if(xStreamBufferReceive(rx_stream, &buff[1], 2, pdMS_TO_TICKS(PROTOCOL_WAIT * 2)) == 2){
                 cmd = buff[1];  //robusto?
                 len = buff[2];
+                if(len > PROTOCOL_MAX_PAYLOAD_SIZE){//longitud de mensaje fuera de rango
+                    xStreamBufferReset(rx_stream);  //Borro el buffer y respond nack
+                    estado = ST_REP;
+                }
                 if (len > 0){
                     estado = ST_LEER_PAYLOAD;
                 } else {

@@ -85,7 +85,7 @@ void uart_rx_task(void *pvParameters) {
     uart_event_t event;
     static uint8_t temp_rx_buf[UART_RX_STREAMBUFFER_SIZE];    //Buffer temporal donde se lee el buffer de rx
     ESP_LOGI("UART","TAREA DE RX");     
-    uart_write_bytes(UART_PORT, "ABC\n\r", 5);    //Lo uso para debuguear el picocom se va
+    //uart_write_bytes(UART_PORT, "ABC\n\r", 5);    //Lo uso para debuguear el picocom se va
 
     while(1) {
         // 1. Esperar un evento de la cola (Bloqueo total sin CPU)
