@@ -94,7 +94,7 @@ void CMD100_INVERTER_task(void *pvParameters) {
             exit_buffer[i] = entry_buffer[n-1-i];
         }
 
-        composer(100,n,exit_buffer,NULL);   //El composer toma el semaforo
+        composer(100,n,exit_buffer,sem);   //El composer toma el semaforo
 
         xSemaphoreTake(sem,portMAX_DELAY);  //Intento tomar, es decir bloqueo la salida hasta el envio
         xSemaphoreGive(sem);    //Cuando el dispacer entrego, puedo retomar, esto pq el buffer se pasa por puntero y no por copia

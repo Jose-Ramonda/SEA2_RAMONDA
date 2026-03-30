@@ -53,27 +53,7 @@ void uart_init(void){       //Tarea, que se autodestruye mejor que función, la 
     ESP_LOGI("UART", "UART inicializado correctamente");
 }
 
-void uart_rx_task_poll(void *arg)
-{
-    // Usar static saca el buffer del stack de la tarea y lo lleva a la memoria global
-    static uint8_t temp_rx_buf[UART_RX_STREAMBUFFER_SIZE];    //Buffer temporal donde se lee el buffer de rx
-    ESP_LOGI("UART","TAREA DE RX");
-    uart_write_bytes(UART_PORT, "ABC\n", 4);
-    while (1) {
-        int n = uart_read_bytes(
-            UART_PORT,
-            temp_rx_buf,
-            100,
-            //sizeof(temp_rx_buf),
-            pdMS_TO_TICKS(100)
-        );
 
-        if (n > 0) {
-            printf("Recibi algo\n");
-            xStreamBufferSend(rx_stream, (void*) temp_rx_buf, n , 0);
-        }
-    }
-}
 
 StreamBufferHandle_t uart_get_rx_streambuffer(void){
     return rx_stream;
@@ -127,7 +107,7 @@ void uart_rx_task(void *pvParameters) {
             }
         }
     }
-    vTaskDelete(NULL); // Por buena práctica
+    vTaskDelete(NULL); // Por buena práctica, si sale del loop se borra
 }
 
 

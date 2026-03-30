@@ -246,7 +246,8 @@ void composer(uint8_t cmd, uint8_t len, uint8_t *payload, SemaphoreHandle_t bins
 
     if(xQueueSend(tx_queue, &mensaje, pdMS_TO_TICKS(PROTOCOL_WAIT) * sizeof(q_msj_t)) != pdPASS){
         ESP_LOGE("PROTOCOL", "Error: Cola de salida llena");
-        if(binsen != NULL){     // si falla la cola devuelcvo el semaforo antes de volver
+        if(binsen != NULL){  
+            xSemaphoreGive(binsen);   // si falla la cola devuelcvo el semaforo antes de volver
     }
     }
 

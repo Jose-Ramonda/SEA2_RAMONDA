@@ -31,7 +31,6 @@
 
 
 void uart_init(void);
-void uart_rx_task_poll(void *arg);
 void uart_rx_task(void *pvParameters);
 
 void app_uart_send(uint8_t *trama, int len);
